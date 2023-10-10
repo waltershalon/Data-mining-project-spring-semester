@@ -1,0 +1,276 @@
+---
+title: "final project"
+output: html_document
+date: '2023-03-31'
+---
+
+
+```
+- Dataset description: The dataset is adapted from an article by Realinho et al. (2022). The dataset describes program outcomes for university students in Portugal that are enrolled between the 2008-2009 and the 2018-2019 period. Student information includes demographic data, socioeconomic data, family background data, and academic data during their first two semesters. The target variable to be predicted is the outcome status after the normal duration of the degree (one extra year for Nursing students). Student outcomes are Graduate, Enrolled (not graduating on time), and Drop out.
+* The data is compiled from several separate databases on national university entrance exams, university academic records, and macroeconomic data. The data features are grouped as follows: 
+- Demographic data contains basic information about the student such as age of enrollment, nationality, home country, marital status.
+- Socioeconomic data contains information about student's parents, financial information (debt, tuition, and scholarships)
+- Academic data contains information on educational background, number of courses enrolled, daytime/evening enrollment, and academic records for the 1st and 2nd semester
+
+* Methods used for this project
+- In this project, we will use machine learning methods to understand if gathering information on students' backgrounds and academic records early in their college education can help predict outcomes and inform college administration policies that help retain enrollment and increase graduation rates.
+- LightGBM: this is a gradient boosting method that is optimized for efficiency, making it suitable for larger datasets and help save computation time. It also builds multiple trees, but it buill
+```
+
+```{r}
+#Load libraries
+library(dplyr)
+library(tidyverse)
+library(stringr)
+library(lightgbm)
+library(MLmetrics)
+```
+
+```{r}
+ac <- read.csv("kaggle_acad_success_dataset.csv", header = TRUE)
+#Edit column names 
+colnames(ac)[c(20:31)] <- c("credit_1st", "enrolled_1st", "evals_1st", "approved_1st", "grade_1st", "wo_evals_1st", "credit_2nd", "enrolled_2nd", "evals_2nd", "approved_2nd", "grade_2nd", "wo_evals_2nd")
+
+
+#Add NA check
+for (x in 1:ncol(ac)) {
+  print(sum(is.na(ac[, x])))
+}
+#Notice that if there were no credits evaluated or credited in the first semester, that probably means the student abandons their education (zero grade and/or dropout). Let's check this
+
+subset(ac, credit_1st == "0" & evals_1st == "0")$grade_1st %>% sum()
+
+subset(ac, credit_1st == "0" & evals_1st == "0")$Target %>% table()
+#So about a quarter of those students are still able to continue with their education, which is alright
+
+subset(ac, credit_2nd == "0" & evals_2nd == "0")$grade_2nd %>% sum()
+# Same pattern for second semester
+
+subset(ac, credit_1st == "0" & evals_1st == "0" & credit_2nd == "0" & evals_2nd == "0")$Target %>% table()
+# Despite not getting any credits for the entirety of the first year, some students are still capable of remain in the program and possibly graduate
+#Other patterns to check: credits with evals > credits approved, if credits approved = 0 => grade = 0\
+
+ac[ac$evals_1st < ac$approved_1st, ]
+
+ac[ac$evals_2nd < ac$approved_2nd, ]
+
+#Add: correlation matrix
+
+#Let's keep the columns that described number of credits evaluated (credits that are not dropped and used to compute grades), credits approved (at least passing grade) and final semester grades
+
+ac <- ac %>% select(-c("credit_1st", "enrolled_1st", "wo_evals_1st", "credit_2nd", "enrolled_2nd", "wo_evals_2nd"))
+#First analysis: run full model, then model without second semester grades => see if performance is the same, which means that we can predict outcomes earlier and implement strategies earlier
+```
+
+```{r}
+#Check column types
+sapply(ac, typeof)
+
+#Change to numeric: age at enrollment, evals_1st, approved_1st, evals_2nd, approved_2nd
+#Change to factor: Target
+
+ac$Target <- as.numeric(as.factor(ac$Target)) - 1
+
+ac <- ac %>% mutate_at(c("Age.at.enrollment", "evals_1st", "approved_1st", "evals_2nd", "approved_2nd"), as.numeric)
+
+```
+
+```{r}
+#Check number of categories for each categorical variable. If the column is not a categorical variable, print the variable type
+sapply(ac, function(x) {
+  if (typeof(x) == "integer") {
+    print(length(unique(x)))
+  }
+  else {
+    print(typeof(x))
+  }
+})
+```
+
+```{r}
+#Temporarily drop high cardinality columns: "Application.mode", "Course", "Previous.qualification", "Mother.s.qualification", "Father.s.qualification", "Mother.s.occupation", "Father.s.occupation"
+
+#Drop "1" and "9" levels from Application order (due to low sample size)
+ac <- ac %>% select(-c("Application.mode", "Course", "Previous.qualification", "Mother.s.qualification", "Father.s.qualification", "Mother.s.occupation", "Father.s.occupation"))
+ac <- ac[ac$Application.order != "0" & ac$Application.order != "9", ]
+
+
+```
+
+```{r}
+#Create training, validation, and test set
+ac$ID <- 1:nrow(ac)
+train <- sample_frac(ac, 0.7)
+val <- anti_join(ac, train, by = "ID")
+test <- sample_frac(val, 0.5)
+val <- anti_join(val, test, by = "ID")
+train$ID <- NULL
+val$ID <- NULL
+test$ID <- NULL
+
+train_label <- train$Target
+val_label <- val$Target
+test_label <- test$Target
+train$Target <- NULL
+val$Target <- NULL
+test$Target <- NULL
+```
+
+```{r}
+#grid search
+# There are many parameters we can optimize for LightGBM. In this analysis we will focus on the following: number of leaves, maximum tree depth, number of iterations, early stopping, and learning rate.
+no_leaves <- c(15, 20, 25, 31)
+max_depth <- c(5, 10, 15)
+no_iterations <- seq(100, 300, 100)
+early_stopping <- no_iterations * 0.1
+lr <- c(0.1, 0.4, 0.5)
+
+hyper_grid <- expand.grid(max_depth = max_depth,
+                          num_leaves = no_leaves,
+                          num_iterations = no_iterations,
+                          early_stopping_rounds = early_stopping,
+                          learning_rate = lr
+                          )
+
+hyper_grid <- unique(hyper_grid)
+
+logloss_data <- c(rep(0, nrow(hyper_grid)))
+```
+
+```{r}
+#Create training and validation dataset appropriate for lightgbm package input
+train_lgb <- lgb.Dataset(as.matrix(train), label = train_label)
+val_lgb <- lgb.Dataset.create.valid(train_lgb, as.matrix(val),label = val_label)
+
+#Create a label matrix to calculate logloss later:
+val0 <- ifelse(val == 0, 1, 0)
+val1 <- ifelse(val == 1, 1, 0)
+val2 <- ifelse(val == 2, 1, 0)
+logloss_label_matrix <- as.data.frame(val0, val1, val2)
+```
+
+```{r}
+#Grid search run
+#Here to reduce runtime we also add bagging frequency (2) and bagging+feature fraction (0.8). This means that for every other iteration, the model randomly selects 80% of the data and the features to run, reducing computation time. Model selection is based on the model with the lowest logloss.
+for (x in 1:nrow(hyper_grid)) {
+  set.seed(1000)
+  lgbm <- lgb.train(
+    params = list(
+      objective = "multiclass",
+      num_class = 3,
+      metric = "multi_logloss",
+      num_leaves =hyper_grid$num_leaves[x],
+      num_iterations = hyper_grid$num_iterations[x],
+      early_stopping_rounds=hyper_grid$early_stopping_rounds[x],
+      learning_rate = hyper_grid$learning_rate[x],
+      bagging_fraction = 0.8,
+      bagging_freq = 2,
+      feature_fraction = 0.8
+    ),
+    valids = list(test = val_lgb),
+    data = train_lgb
+  )
+  preds <- predict(lgbm, as.matrix(val))
+  preds <- matrix(preds, ncol = 3, byrow = TRUE)
+  preds <- as.data.frame(preds)
+  logloss_data[x] <- MultiLogLoss(preds, logloss_label_matrix)
+}
+```
+
+```{r}
+mod_index <- match(min(logloss_data), logloss_data)
+hyper_grid[mod_index, ]
+
+#How many models are equally the best
+sum(logloss_data == min(logloss_data))
+```
+```{r}
+#Rerun models with chosen parameters (lowest logloss)
+set.seed(1001)
+final_mod <- lgb.train(
+    params = list(
+      objective = "multiclass",
+      num_class = 3,
+      metric = "multi_logloss",
+      num_leaves = 5,
+      num_iterations = 100,
+      early_stopping_rounds= 10,
+      learning_rate = 0.4,
+      bagging_fraction = 0.8,
+      bagging_freq = 2,
+      feature_fraction = 0.8
+    ),
+    valids = list(test = val_lgb),
+    data = train_lgb
+  )
+val_preds <- predict(final_mod, as.matrix(val))
+val_preds <- matrix(val_preds, ncol = 3, byrow = TRUE)
+val_preds <- as.data.frame(val_preds)
+vector_preds <- c(rep(0, nrow(val_preds)))
+for (k in 1:nrow(val_preds)) {
+  vector_preds[k] = match(max(val_preds[k, ]), val_preds[k, ]) - 1
+}
+
+#Results
+sum(vector_preds == val_label)/length(val_label)
+table(vector_preds, val_label)
+```
+
+```{r}
+#Apply the model to the test set
+test_preds <- predict(final_mod, as.matrix(test), response = "class")
+test_preds <- matrix(test_preds, ncol = 3, byrow = TRUE)
+test_preds <- as.data.frame(test_preds)
+vector_preds <- c(rep(0, nrow(val_preds)))
+for (k in 1:nrow(test_preds)) {
+  vector_preds[k] = match(max(test_preds[k, ]), test_preds[k, ]) - 1
+}
+
+#Results
+sum(vector_preds == test_label)/length(test_label)
+table(vector_preds, test_label)
+lgb.importance(final_mod)
+```
+
+```{r}
+#Repeat analyses without 2nd semester variables
+train <- train %>% select(-c("evals_2nd", "approved_2nd", "grade_2nd"))
+val <- val %>% select(-c("evals_2nd", "approved_2nd", "grade_2nd"))
+test <- test %>% select(-c("evals_2nd", "approved_2nd", "grade_2nd"))
+train_lgb <- lgb.Dataset(as.matrix(train), label = train_label)
+val_lgb <- lgb.Dataset.create.valid(train_lgb, as.matrix(val),label = val_label)
+
+set.seed(1001)
+final_mod <- lgb.train(
+    params = list(
+      objective = "multiclass",
+      num_class = 3,
+      metric = "multi_logloss",
+      num_leaves = 5,
+      num_iterations = 100,
+      early_stopping_rounds= 10,
+      learning_rate = 0.4,
+      bagging_fraction = 0.8,
+      bagging_freq = 2,
+      feature_fraction = 0.8
+    ),
+    valids = list(test = val_lgb),
+    data = train_lgb
+  )
+val_preds <- predict(final_mod, as.matrix(val), response = "class")
+val_preds <- matrix(val_preds, ncol = 3, byrow = TRUE)
+val_preds <- as.data.frame(val_preds)
+vector_preds <- c(rep(0, nrow(val_preds)))
+for (k in 1:nrow(val_preds)) {
+  vector_preds[k] = match(max(val_preds[k, ]), val_preds[k, ]) - 1
+}
+
+#Results
+sum(vector_preds == val_label)/length(val_label)
+table(vector_preds, val_label)
+```
+```{r}
+lgb.importance(final_mod)
+```
+
+
