@@ -30,10 +30,7 @@ This repository contains all materials related to the final project. The project
     - Ensure you have R and all the necessary libraries installed. You can install the libraries using the `install.packages()` function in R.
     
 2. **Running the Code:**
-    - Navigate to the `Code/` directory and run the scripts in the following order: 
-        1. `data_cleaning.R`: To preprocess the data.
-        2. `eda.R`: For exploratory data analysis.
-        3. `modeling.R`: To train the LightGBM model and evaluate its performance.
+    - Navigate to the `Code/` directory and run the scripts.
     - Alternatively, if using a notebook: execute cells in order to prevent any runtime issues.
 
 3. **Visualizing Results:**
