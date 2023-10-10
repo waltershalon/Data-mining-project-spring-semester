@@ -30,13 +30,12 @@ This repository contains all materials related to the final project. The project
     - Ensure you have R and all the necessary libraries installed. You can install the libraries using the `install.packages()` function in R.
     
 2. **Running the Code:**
-    - Navigate to the `Code/` directory and run the scripts.
+    - Navigate to the `Project.Rmd` file and run the scripts.
     - Alternatively, if using a notebook: execute cells in order to prevent any runtime issues.
 
 3. **Visualizing Results:**
-    - Check the `Figures/` directory for generated plots and visualizations.
-    - Refer to the `Results/` directory for model outcomes and predictions.
-
+    - Check the `Presentation/` directory for generated plots and visualizations.
+      
 4. **Contributing:**
     - For collaboration or contribution, please refer to the CONTRIBUTING.md file for guidelines. [Note: You might create a CONTRIBUTING.md file with clear guidelines if you want to allow others to contribute.]
 
